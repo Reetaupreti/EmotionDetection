@@ -1,75 +1,87 @@
 import cv2
 import numpy as np
+import time
+import csv
+import os
 from tensorflow.keras.models import load_model
-from collections import deque
+from tensorflow.keras.preprocessing.image import img_to_array
 
-# Load emotion model
-model = load_model("emotion_detector.h5")
-emotion_classes = ['Angry','Disgust','Fear','Happy','Sad','Surprise','Neutral']
+print("SCRIPT STARTED")
 
-# Load DNN face detector
-face_net = cv2.dnn.readNetFromCaffe(
-    "deploy.prototxt",
-    "res10_300x300_ssd_iter_140000.caffemodel"
+# Load trained emotion model
+model = load_model("final_emotion_model.h5")
+classes = ['angry', 'disgust', 'fear', 'happy', 'sad', 'surprise', 'neutral']
+
+# Load Haar cascade face detector
+face_detector = cv2.CascadeClassifier(
+    cv2.data.haarcascades + "haarcascade_frontalface_default.xml"
 )
 
-# Initialize webcam
-cam = cv2.VideoCapture(0)
+# Start webcam
+cap = cv2.VideoCapture(0)
+if not cap.isOpened():
+    print("ERROR: Webcam not accessible")
+    exit()
 
-# For smoothing predictions
-smoothed_predictions = {}  # key: face id (if multiple faces)
-SMOOTHING_BUFFER = 5       # number of frames to average
+emotion_log = []
+start_time = time.time()
 
-while True:
-    ret, frame = cam.read()
-    if not ret:
-        break
+print("Webcam opened. Press ESC to exit.")
 
-    h, w = frame.shape[:2]
-    blob = cv2.dnn.blobFromImage(cv2.resize(frame, (300, 300)), 1.0,
-                                 (300, 300), (104.0, 177.0, 123.0))
-    face_net.setInput(blob)
-    detections = face_net.forward()
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Frame capture failed")
+            break
 
-    faces_current_frame = []
+        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        faces = face_detector.detectMultiScale(gray, 1.3, 5)
 
-    for i in range(detections.shape[2]):
-        confidence = detections[0, 0, i, 2]
-        if confidence > 0.5:
-            box = detections[0, 0, i, 3:7] * np.array([w, h, w, h])
-            (x1, y1, x2, y2) = box.astype("int")
-            faces_current_frame.append((x1, y1, x2, y2))
+        for (x, y, w, h) in faces:
+            face = gray[y:y+h, x:x+w]
+            face = cv2.resize(face, (48, 48))
+            face = face.astype("float") / 255.0
+            face = img_to_array(face)
+            face = np.expand_dims(face, axis=0)
 
-            # Extract face and preprocess
-            face = frame[y1:y2, x1:x2]
-            gray = cv2.cvtColor(face, cv2.COLOR_BGR2GRAY)
-            gray = cv2.resize(gray, (48, 48))
-            gray = gray.reshape(1,48,48,1)/255.0
+            # Predict emotion
+            preds = model.predict(face, verbose=0)[0]
+            emotion_index = np.argmax(preds)
+            label = classes[emotion_index]
+            confidence = int(preds[emotion_index] * 100)  # integer %
 
-            prediction = model.predict(gray)[0]  # get array of probabilities
+            current_time = round(time.time() - start_time, 2)
+            emotion_log.append([current_time, label, confidence])
 
-            # Smooth predictions using deque
-            key = (x1, y1, x2, y2)  # using position as face id
-            if key not in smoothed_predictions:
-                smoothed_predictions[key] = deque(maxlen=SMOOTHING_BUFFER)
-            smoothed_predictions[key].append(prediction)
-            avg_pred = np.mean(smoothed_predictions[key], axis=0)
+            # Draw face box and label
+            cv2.rectangle(frame, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            text = f"{label} ({confidence}%)"
+            cv2.putText(frame, text, (x, y-10),
+                        cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
 
-            emotion = emotion_classes[np.argmax(avg_pred)]
-            confidence_score = avg_pred[np.argmax(avg_pred)]
+        cv2.imshow("Emotion Detection (ESC to Exit)", frame)
 
-            # Draw rectangle and label
-            label = f"{emotion} ({confidence_score*100:.1f}%)"
-            cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 255, 0), 2)
-            cv2.putText(frame, label, (x1, y1-10),
-                        cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255,255,255), 2)
+        if cv2.waitKey(10) & 0xFF == 27:
+            print("ESC pressed. Exiting loop.")
+            break
 
-    # Remove old faces from smoothing dict
-    smoothed_predictions = {k: v for k, v in smoothed_predictions.items() if k in faces_current_frame}
+finally:
+    print("FINALLY BLOCK EXECUTING")
 
-    cv2.imshow("Smooth Emotion Detector", frame)
-    if cv2.waitKey(1) == 27:  # ESC to exit
-        break
+    cap.release()
+    cv2.destroyAllWindows()
 
-cam.release()
-cv2.destroyAllWindows()
+    # Overwrite same CSV each run
+    file_path = os.path.join(os.getcwd(), "emotion_log.csv")
+
+    print("Saving CSV to:", file_path)
+    print("Total emotion records:", len(emotion_log))
+
+    with open(file_path, "w", newline="") as f:
+        writer = csv.writer(f)
+        writer.writerow(["Time (seconds)", "Emotion", "Confidence (%)"])
+        writer.writerows(emotion_log)
+
+    print("CSV WRITE COMPLETE")
+    print("PROGRAM EXITED SUCCESSFULLY")
